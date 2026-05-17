@@ -230,7 +230,7 @@ with tab_eq:
             tipo = "document" if mt == "application/pdf" else "image"
             try:
                 msg = client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-sonnet-4-5-20251001",
                     max_tokens=1500,
                     messages=[{"role":"user","content":[
                         {"type":tipo,"source":{"type":"base64","media_type":mt,"data":b64}},
