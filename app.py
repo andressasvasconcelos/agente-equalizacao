@@ -150,6 +150,161 @@ def render_steps(current):
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
+# ═══════════════════════════════════════════════════════════════════
+# FUNÇÕES DE GERAÇÃO DE PDF
+# ═══════════════════════════════════════════════════════════════════
+
+def _salvar_historico(sc_num, suppliers, totais_forn, win_idx, html_pdf):
+    hist = st.session_state.get("historico", [])
+    if any(h["sc_num"] == sc_num for h in hist):
+        return
+    t_val    = [t for t in totais_forn if t > 0]
+    vencedor = suppliers[win_idx].get("fornecedor", "—") if win_idx >= 0 else "—"
+    menor    = brl(min(t_val)) if t_val else "—"
+    hist.append({
+        "sc_num":      sc_num,
+        "data":        datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "n_forn":      len(suppliers),
+        "fornecedores":[s.get("fornecedor") or f"Forn.{i+1}" for i, s in enumerate(suppliers)],
+        "vencedor":    vencedor,
+        "menor_total": menor,
+        "html":        html_pdf,
+    })
+    st.session_state.historico = hist
+
+
+def _build_pdf_html(sc_num, suppliers, master, totais_forn, win_idx, menor_idx_fn, n):
+    """Gera o HTML completo do PDF para download."""
+
+    def _forn_hd(si):
+        bg    = "#085041" if si == win_idx and totais_forn[si] > 0 else "#1a7a62"
+        nome  = esc(suppliers[si].get("fornecedor") or f"Fornecedor {si+1}")
+        cnpj  = suppliers[si].get("cnpj") or ""
+        cnpj_div = f'<div style="font-size:9px;opacity:.8">{esc(cnpj)}</div>' if cnpj else ""
+        return (
+            f'<th colspan="2" style="background:{bg};color:#fff;padding:7px 9px;'
+            f'font-size:10px;text-align:center;border-right:1px solid rgba(255,255,255,.2)">'
+            f'<div style="font-weight:700">{nome}</div>{cnpj_div}</th>'
+        )
+    forn_hds = "".join([_forn_hd(si) for si in range(n)])
+
+    sub_hds = "".join([
+        '<th style="background:#0f6e56;color:#fff;padding:4px 7px;font-size:9px;text-align:right">Preço Unit.</th>'
+        '<th style="background:#0f6e56;color:#fff;padding:4px 7px;font-size:9px;text-align:right">Preço Total</th>'
+        for _ in range(n)
+    ])
+
+    rows = ""
+    for idx, it in enumerate(master):
+        q   = float(it.get("quantidade") or 0)
+        msi = menor_idx_fn(idx)
+        cells = ""
+        for si in range(n):
+            vu    = st.session_state.prices.get(f"vu_{si}_{idx}", 0.0)
+            total = vu * q
+            is_m  = si == msi and total > 0
+            bg    = "background:#eaf7f2;font-weight:700;color:#0d5c4a;" if is_m else ""
+            star  = "★ " if is_m else ""
+            cells += (
+                f'<td style="{bg}text-align:right;font-size:10px;padding:5px 7px;border-right:1px solid #eee">'
+                f'{brl(vu) if vu>0 else "—"}</td>'
+                f'<td style="{bg}text-align:right;font-size:10px;padding:5px 7px;border-right:1px solid #eee">'
+                f'{star}{brl(total) if total>0 else "—"}</td>'
+            )
+        rows += (
+            f'<tr style="border-bottom:1px solid #eee">'
+            f'<td style="font-size:10px;padding:5px 7px">{esc(it["descricao"])}</td>'
+            f'<td style="font-size:9px;color:#777;padding:5px 7px">{esc(it.get("detalhe",""))}</td>'
+            f'<td style="font-size:10px;text-align:right;padding:5px 7px;font-family:monospace">{q if q else ""}</td>'
+            f'<td style="font-size:10px;text-align:center;padding:5px 7px;color:#777">{esc(it.get("unidade",""))}</td>'
+            f'{cells}</tr>'
+        )
+
+    tot_cells = "".join([
+        f'<td></td><td style="text-align:right;padding:8px 7px;font-weight:700;color:#fff;'
+        f'{"background:#085041" if si==win_idx and totais_forn[si]>0 else ""}">'
+        f'{brl(totais_forn[si])}</td>'
+        for si in range(n)
+    ])
+
+    finfos = "".join([
+        f'<div style="background:#f5f5f3;border:1px solid #ddd;border-radius:5px;padding:9px 11px;font-size:9.5px">'
+        f'<div style="font-weight:700;color:#0d5c4a;margin-bottom:4px">'
+        f'Fornecedor {si+1}{" ★ Menor Preço Total" if si==win_idx and totais_forn[si]>0 else ""}</div>'
+        f'<div><b>Empresa:</b> {esc(suppliers[si].get("fornecedor","—"))}</div>'
+        f'<div><b>CNPJ:</b> {esc(suppliers[si].get("cnpj","—"))}</div>'
+        f'<div><b>Contato:</b> {esc(suppliers[si].get("contato","—"))}</div>'
+        f'<div><b>Telefone:</b> {esc(suppliers[si].get("telefone","—"))}</div>'
+        f'<div><b>E-mail:</b> {esc(suppliers[si].get("email","—"))}</div>'
+        f'{"<div><b>Pgto:</b> "+esc(suppliers[si].get("condicoes_pagamento",""))+"</div>" if suppliers[si].get("condicoes_pagamento") else ""}'
+        f'{"<div><b>Prazo:</b> "+esc(suppliers[si].get("prazo_atendimento",""))+"</div>" if suppliers[si].get("prazo_atendimento") else ""}'
+        f'</div>'
+        for si in range(n)
+    ])
+
+    data_str = datetime.datetime.now().strftime("%d/%m/%Y")
+    hora_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="UTF-8">
+<title>mapa_equalizacao_{esc(sc_num)}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:Arial,sans-serif;font-size:11px;color:#1a1a1a;padding:18px}}
+@media print{{
+  @page{{size:A4 landscape;margin:10mm}}
+  body{{padding:0}}
+  .np{{display:none!important}}
+}}
+table{{width:100%;border-collapse:collapse}}
+.top{{display:flex;justify-content:space-between;align-items:flex-start;
+  margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid #0d5c4a}}
+.fg{{display:grid;grid-template-columns:repeat({n},1fr);gap:8px;margin-bottom:14px}}
+.pbtn{{position:fixed;bottom:22px;right:22px;background:#c9a227;color:#fff;border:none;
+  padding:12px 22px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;
+  box-shadow:0 4px 16px rgba(0,0,0,.25);z-index:999}}
+.pbtn:hover{{background:#b8911e}}
+</style>
+</head><body>
+<button class="np pbtn" onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+<div class="top">
+  <div>
+    <div style="font-size:17px;font-weight:700;color:#0d5c4a">Wert<span style="color:#c9a227">.</span></div>
+    <div style="font-size:13px;font-weight:700">EQUALIZAÇÃO DE PROPOSTAS · FM-030</div>
+  </div>
+  <div style="text-align:right;font-size:10px;color:#555">
+    <div style="font-weight:700;font-size:12px">SC: {esc(sc_num)}</div>
+    <div>Rev.00 · {data_str}</div>
+  </div>
+</div>
+<div class="fg">{finfos}</div>
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:left">Descrição</th>
+      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px">Detalhe</th>
+      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:right">Qtd.</th>
+      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:center">Un.</th>
+      {forn_hds}
+    </tr>
+    <tr>{sub_hds}</tr>
+  </thead>
+  <tbody>{rows}</tbody>
+  <tfoot>
+    <tr style="background:#0d5c4a;color:#fff">
+      <td colspan="4" style="padding:8px;font-weight:700">TOTAL GERAL</td>
+      {tot_cells}
+    </tr>
+  </tfoot>
+</table>
+<div style="margin-top:14px;display:flex;justify-content:space-between;
+  font-size:9px;color:#bbb;border-top:1px solid #eee;padding-top:7px">
+  <span>Agente FM-030 · Allwert · {hora_str}</span>
+  <span>mapa_equalizacao_{esc(sc_num)}.pdf</span>
+</div>
+</body></html>"""
+
+
 # ── Tabs ──────────────────────────────────────────────────────────
 tab_eq, tab_hist = st.tabs(["📊 Equalização", "📁 Histórico"])
 
@@ -593,157 +748,3 @@ with tab_hist:
                         key=f"dl_h_{i}",
                     )
                 st.divider()
-
-# ═══════════════════════════════════════════════════════════════════
-# FUNÇÕES DE GERAÇÃO DE PDF
-# ═══════════════════════════════════════════════════════════════════
-
-def _salvar_historico(sc_num, suppliers, totais_forn, win_idx, html_pdf):
-    hist = st.session_state.get("historico", [])
-    if any(h["sc_num"] == sc_num for h in hist):
-        return
-    t_val    = [t for t in totais_forn if t > 0]
-    vencedor = suppliers[win_idx].get("fornecedor", "—") if win_idx >= 0 else "—"
-    menor    = brl(min(t_val)) if t_val else "—"
-    hist.append({
-        "sc_num":      sc_num,
-        "data":        datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "n_forn":      len(suppliers),
-        "fornecedores":[s.get("fornecedor") or f"Forn.{i+1}" for i, s in enumerate(suppliers)],
-        "vencedor":    vencedor,
-        "menor_total": menor,
-        "html":        html_pdf,
-    })
-    st.session_state.historico = hist
-
-
-def _build_pdf_html(sc_num, suppliers, master, totais_forn, win_idx, menor_idx_fn, n):
-    """Gera o HTML completo do PDF para download."""
-
-    def _forn_hd(si):
-        bg    = "#085041" if si == win_idx and totais_forn[si] > 0 else "#1a7a62"
-        nome  = esc(suppliers[si].get("fornecedor") or f"Fornecedor {si+1}")
-        cnpj  = suppliers[si].get("cnpj") or ""
-        cnpj_div = f'<div style="font-size:9px;opacity:.8">{esc(cnpj)}</div>' if cnpj else ""
-        return (
-            f'<th colspan="2" style="background:{bg};color:#fff;padding:7px 9px;'
-            f'font-size:10px;text-align:center;border-right:1px solid rgba(255,255,255,.2)">'
-            f'<div style="font-weight:700">{nome}</div>{cnpj_div}</th>'
-        )
-    forn_hds = "".join([_forn_hd(si) for si in range(n)])
-
-    sub_hds = "".join([
-        '<th style="background:#0f6e56;color:#fff;padding:4px 7px;font-size:9px;text-align:right">Preço Unit.</th>'
-        '<th style="background:#0f6e56;color:#fff;padding:4px 7px;font-size:9px;text-align:right">Preço Total</th>'
-        for _ in range(n)
-    ])
-
-    rows = ""
-    for idx, it in enumerate(master):
-        q   = float(it.get("quantidade") or 0)
-        msi = menor_idx_fn(idx)
-        cells = ""
-        for si in range(n):
-            vu    = st.session_state.prices.get(f"vu_{si}_{idx}", 0.0)
-            total = vu * q
-            is_m  = si == msi and total > 0
-            bg    = "background:#eaf7f2;font-weight:700;color:#0d5c4a;" if is_m else ""
-            star  = "★ " if is_m else ""
-            cells += (
-                f'<td style="{bg}text-align:right;font-size:10px;padding:5px 7px;border-right:1px solid #eee">'
-                f'{brl(vu) if vu>0 else "—"}</td>'
-                f'<td style="{bg}text-align:right;font-size:10px;padding:5px 7px;border-right:1px solid #eee">'
-                f'{star}{brl(total) if total>0 else "—"}</td>'
-            )
-        rows += (
-            f'<tr style="border-bottom:1px solid #eee">'
-            f'<td style="font-size:10px;padding:5px 7px">{esc(it["descricao"])}</td>'
-            f'<td style="font-size:9px;color:#777;padding:5px 7px">{esc(it.get("detalhe",""))}</td>'
-            f'<td style="font-size:10px;text-align:right;padding:5px 7px;font-family:monospace">{q if q else ""}</td>'
-            f'<td style="font-size:10px;text-align:center;padding:5px 7px;color:#777">{esc(it.get("unidade",""))}</td>'
-            f'{cells}</tr>'
-        )
-
-    tot_cells = "".join([
-        f'<td></td><td style="text-align:right;padding:8px 7px;font-weight:700;color:#fff;'
-        f'{"background:#085041" if si==win_idx and totais_forn[si]>0 else ""}">'
-        f'{brl(totais_forn[si])}</td>'
-        for si in range(n)
-    ])
-
-    finfos = "".join([
-        f'<div style="background:#f5f5f3;border:1px solid #ddd;border-radius:5px;padding:9px 11px;font-size:9.5px">'
-        f'<div style="font-weight:700;color:#0d5c4a;margin-bottom:4px">'
-        f'Fornecedor {si+1}{" ★ Menor Preço Total" if si==win_idx and totais_forn[si]>0 else ""}</div>'
-        f'<div><b>Empresa:</b> {esc(suppliers[si].get("fornecedor","—"))}</div>'
-        f'<div><b>CNPJ:</b> {esc(suppliers[si].get("cnpj","—"))}</div>'
-        f'<div><b>Contato:</b> {esc(suppliers[si].get("contato","—"))}</div>'
-        f'<div><b>Telefone:</b> {esc(suppliers[si].get("telefone","—"))}</div>'
-        f'<div><b>E-mail:</b> {esc(suppliers[si].get("email","—"))}</div>'
-        f'{"<div><b>Pgto:</b> "+esc(suppliers[si].get("condicoes_pagamento",""))+"</div>" if suppliers[si].get("condicoes_pagamento") else ""}'
-        f'{"<div><b>Prazo:</b> "+esc(suppliers[si].get("prazo_atendimento",""))+"</div>" if suppliers[si].get("prazo_atendimento") else ""}'
-        f'</div>'
-        for si in range(n)
-    ])
-
-    data_str = datetime.datetime.now().strftime("%d/%m/%Y")
-    hora_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    return f"""<!DOCTYPE html>
-<html lang="pt-BR"><head><meta charset="UTF-8">
-<title>mapa_equalizacao_{esc(sc_num)}</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:Arial,sans-serif;font-size:11px;color:#1a1a1a;padding:18px}}
-@media print{{
-  @page{{size:A4 landscape;margin:10mm}}
-  body{{padding:0}}
-  .np{{display:none!important}}
-}}
-table{{width:100%;border-collapse:collapse}}
-.top{{display:flex;justify-content:space-between;align-items:flex-start;
-  margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid #0d5c4a}}
-.fg{{display:grid;grid-template-columns:repeat({n},1fr);gap:8px;margin-bottom:14px}}
-.pbtn{{position:fixed;bottom:22px;right:22px;background:#c9a227;color:#fff;border:none;
-  padding:12px 22px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;
-  box-shadow:0 4px 16px rgba(0,0,0,.25);z-index:999}}
-.pbtn:hover{{background:#b8911e}}
-</style>
-</head><body>
-<button class="np pbtn" onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
-<div class="top">
-  <div>
-    <div style="font-size:17px;font-weight:700;color:#0d5c4a">Wert<span style="color:#c9a227">.</span></div>
-    <div style="font-size:13px;font-weight:700">EQUALIZAÇÃO DE PROPOSTAS · FM-030</div>
-  </div>
-  <div style="text-align:right;font-size:10px;color:#555">
-    <div style="font-weight:700;font-size:12px">SC: {esc(sc_num)}</div>
-    <div>Rev.00 · {data_str}</div>
-  </div>
-</div>
-<div class="fg">{finfos}</div>
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:left">Descrição</th>
-      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px">Detalhe</th>
-      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:right">Qtd.</th>
-      <th rowspan="2" style="background:#0d5c4a;color:#fff;padding:7px 8px;text-align:center">Un.</th>
-      {forn_hds}
-    </tr>
-    <tr>{sub_hds}</tr>
-  </thead>
-  <tbody>{rows}</tbody>
-  <tfoot>
-    <tr style="background:#0d5c4a;color:#fff">
-      <td colspan="4" style="padding:8px;font-weight:700">TOTAL GERAL</td>
-      {tot_cells}
-    </tr>
-  </tfoot>
-</table>
-<div style="margin-top:14px;display:flex;justify-content:space-between;
-  font-size:9px;color:#bbb;border-top:1px solid #eee;padding-top:7px">
-  <span>Agente FM-030 · Allwert · {hora_str}</span>
-  <span>mapa_equalizacao_{esc(sc_num)}.pdf</span>
-</div>
-</body></html>"""
