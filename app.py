@@ -154,14 +154,14 @@ def render_steps(current):
 # FUNÇÕES DE GERAÇÃO DE PDF
 # ═══════════════════════════════════════════════════════════════════
 
-def _salvar_historico(sc_num, suppliers, totais_forn, win_idx, html_pdf):
+def _salvar_historico(sc_num, suppliers, master, prices, totais_forn, win_idx, html_pdf):
     hist = st.session_state.get("historico", [])
-    if any(h["sc_num"] == sc_num for h in hist):
-        return
+    # atualiza se já existe, senão adiciona
+    existing = next((h for h in hist if h["sc_num"] == sc_num), None)
     t_val    = [t for t in totais_forn if t > 0]
     vencedor = suppliers[win_idx].get("fornecedor", "—") if win_idx >= 0 else "—"
     menor    = brl(min(t_val)) if t_val else "—"
-    hist.append({
+    entry = {
         "sc_num":      sc_num,
         "data":        datetime.datetime.now().strftime("%d/%m/%Y %H:%M"),
         "n_forn":      len(suppliers),
@@ -169,7 +169,15 @@ def _salvar_historico(sc_num, suppliers, totais_forn, win_idx, html_pdf):
         "vencedor":    vencedor,
         "menor_total": menor,
         "html":        html_pdf,
-    })
+        # dados para reedição
+        "suppliers":   [dict(s) for s in suppliers],
+        "master_itens": [dict(m) for m in master],
+        "prices":      dict(prices),
+    }
+    if existing:
+        hist[hist.index(existing)] = entry
+    else:
+        hist.append(entry)
     st.session_state.historico = hist
 
 
@@ -701,7 +709,7 @@ with tab_eq:
         )
 
         # Salvar histórico
-        _salvar_historico(sc_num, suppliers, totais, win_si, html_pdf)
+        _salvar_historico(sc_num, suppliers, master, st.session_state.prices, totais, win_si, html_pdf)
 
         st.markdown("")
         b1, b2 = st.columns([1, 3])
@@ -727,24 +735,107 @@ with tab_hist:
     else:
         st.markdown(f"**{len(hist)} mapa(s) gerado(s) nesta sessão**")
         st.markdown("")
+
+        # verificar se há pedido de reedição pendente
+        if st.session_state.get("_reopen_idx") is not None:
+            idx_r = st.session_state.pop("_reopen_idx")
+            h = hist[idx_r]
+            # restaurar estado completo na sessão
+            st.session_state.sc_num       = h["sc_num"]
+            st.session_state.suppliers    = [dict(s) for s in h["suppliers"]]
+            st.session_state.master_itens = [dict(m) for m in h["master_itens"]]
+            st.session_state.prices       = dict(h["prices"])
+            st.session_state.step         = 4
+            st.rerun()
+
         for i, h in enumerate(reversed(hist)):
-            with st.container():
-                c1, c2, c3, c4 = st.columns([1.2, 2, 2, 1])
-                with c1:
-                    st.markdown(f"**🗂 SC: {h['sc_num']}**")
-                    st.caption(h["data"])
-                with c2:
-                    st.markdown(f"**{h['n_forn']} fornecedor(es)**")
-                    st.caption(" · ".join(h["fornecedores"]))
-                with c3:
-                    st.markdown(f"**Menor total:** {h['menor_total']}")
-                    st.caption(f"Vencedor: {h['vencedor']}")
-                with c4:
+            real_idx = len(hist) - 1 - i   # índice real na lista
+            with st.expander(f"🗂 SC: {h['sc_num']}  ·  {h['data']}  ·  Vencedor: {h['vencedor']}  ({h['menor_total']})", expanded=False):
+
+                # pré-visualização do mapa
+                sups_h  = h.get("suppliers", [])
+                mast_h  = h.get("master_itens", [])
+                prcs_h  = h.get("prices", {})
+                n_h     = len(sups_h)
+
+                if sups_h and mast_h:
+                    # calcular menores para pré-view
+                    def _menor_h(idx):
+                        best, best_si = float("inf"), -1
+                        for si in range(n_h):
+                            vu = prcs_h.get(f"vu_{si}_{idx}", 0.0)
+                            q  = float(mast_h[idx].get("quantidade") or 0)
+                            t  = vu * q
+                            if vu > 0 and t > 0 and t < best:
+                                best, best_si = t, si
+                        return best_si
+
+                    tots_h = [
+                        sum(prcs_h.get(f"vu_{si}_{idx}", 0.0) * float(mast_h[idx].get("quantidade") or 0)
+                            for idx in range(len(mast_h)))
+                        for si in range(n_h)
+                    ]
+                    tv_h   = [t for t in tots_h if t > 0]
+                    win_h  = tots_h.index(min(tv_h)) if tv_h else -1
+
+                    fh_hds = "".join([
+                        f'<th colspan="2" class="{"fhw" if si==win_h and tots_h[si]>0 else "fh"}">' +
+                        esc(sups_h[si].get("fornecedor") or f"Forn.{si+1}") + '</th>'
+                        for si in range(n_h)
+                    ])
+                    sh_hds = "".join(['<th class="sh">Vl.Unit.</th><th class="sh">Vl.Total</th>' for _ in range(n_h)])
+
+                    rows_h = ""
+                    for idx, it in enumerate(mast_h):
+                        q   = float(it.get("quantidade") or 0)
+                        msi = _menor_h(idx)
+                        cells = ""
+                        for si in range(n_h):
+                            vu    = prcs_h.get(f"vu_{si}_{idx}", 0.0)
+                            total = vu * q
+                            is_m  = si == msi and total > 0
+                            cls   = ' class="mp"' if is_m else ""
+                            star  = "★ " if is_m else ""
+                            cells += (f'<td{cls} style="text-align:right">{brl(vu) if vu>0 else "—"}</td>'
+                                      f'<td{cls} style="text-align:right">{star}{brl(total) if total>0 else "—"}</td>')
+                        rows_h += (f"<tr><td>{esc(it['descricao'])}</td>"
+                                   f'<td style="color:#777;font-size:11px">{esc(it.get("detalhe",""))}</td>'
+                                   f'<td style="text-align:right">{q if q else "—"}</td>'
+                                   f'<td style="text-align:center;color:#777">{esc(it.get("unidade",""))}</td>'
+                                   f"{cells}</tr>")
+
+                    tot_h = "".join([
+                        f'<td></td><td class="{"win" if si==win_h and tots_h[si]>0 else ""}" style="text-align:right">{brl(tots_h[si])}</td>'
+                        for si in range(n_h)
+                    ])
+
+                    st.markdown(f"""
+                    <table class="mapa-table">
+                      <thead>
+                        <tr><th colspan="4">Insumos</th>{fh_hds}</tr>
+                        <tr><th>Descrição</th><th>Detalhe</th>
+                          <th style="text-align:right">Qtd.</th>
+                          <th style="text-align:center">Un.</th>{sh_hds}</tr>
+                      </thead>
+                      <tbody>{rows_h}</tbody>
+                      <tfoot><tr><td colspan="4">TOTAL GERAL</td>{tot_h}</tr></tfoot>
+                    </table>""", unsafe_allow_html=True)
+
+                st.markdown("")
+                ca, cb, cc = st.columns([2, 2, 2])
+                with ca:
+                    if st.button("✏️ Reabrir para edição", key=f"edit_h_{i}", type="primary"):
+                        st.session_state["_reopen_idx"] = real_idx
+                        st.rerun()
+                with cb:
                     st.download_button(
-                        "⬇️ PDF",
+                        "⬇️ Baixar PDF",
                         data=h["html"].encode("utf-8"),
                         file_name=f"mapa_equalizacao_{h['sc_num']}.html",
                         mime="text/html",
                         key=f"dl_h_{i}",
                     )
-                st.divider()
+                with cc:
+                    if st.button("🗑 Excluir do histórico", key=f"del_h_{i}"):
+                        st.session_state.historico.pop(real_idx)
+                        st.rerun()
